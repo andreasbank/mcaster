@@ -1,17 +1,28 @@
-/* 
-
-mcast.c - A simple program for sending (x)or receiveing multicast
-Copyright(C) 2013 by Andreas Bank, andreas.mikael.bank@gmail.com
-
-Updated: 2013-06-21 20:23
-
-*/
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+ *
+ *	mcast.c - A simple program for sending (x)or receiveing multicast
+ *	Copyright(C) 2013 by Andreas Bank, andreas.mikael.bank@gmail.com
+ *
+ *	THIS CODE IS A PART OF
+ *		______________________           ______       
+ *		__  __ \__    |__  __/______________  /_______
+ *		_  / / /_  /| |_  /  _  __ \  __ \_  /__  ___/
+ *		/ /_/ /_  ___ |  /   / /_/ / /_/ /  / _(__  ) 
+ *		\___\_\/_/  |_/_/    \____/\____//_/  /____/  
+ *
+ *							https://tools.se.axis.com
+ *
+ *
+ *	Updated: 2013-06-22 10:00
+ *
+ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 #define VERSION "0.9A"
 
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +30,11 @@ Updated: 2013-06-21 20:23
 #include <string.h>
 #include <signal.h>
 #include <errno.h>
-#include <netdb.h>
+#ifdef __WIN__
+#include <winsock2.h>
+#include <iphlpapi.h>
+#pragma comment(lib, "IPHLPAPI.lib")
+#endif
 
 #define TRUE 1
 #define FALSE 0
@@ -31,7 +46,7 @@ void eraseTermChars();
 void cleanup();
 void exitSig();
 char *findArgumentValue(const char *arg, int argc, char **argv);
-void findInterface(struct in_addr *interface, const char *address);
+int findInterface(struct in_addr *interface, const char *address, int af_family);
 
 int sock;
 char *message;
@@ -48,53 +63,56 @@ int main(int argc, char **argv) {
 	int af_family = AF_INET;
 	struct in_addr mcast_address;
 	unsigned short mcast_port = htons(SPAM_PORT);
-	char *spam_string;
+	char *spam_string, *arg_value;
 	struct in_addr mcast_interface;
 	mcast_address.s_addr = htonl(INADDR_ANY);
 	mcast_interface.s_addr = htonl(INADDR_ANY);
 
 	/* sort out arguments */
-	{
-		char *tmpStr = findArgumentValue("-s", argc, argv);
-		if(tmpStr && strcmp(tmpStr, "1") == 0) {
-			server_mode = TRUE;
+	arg_value = findArgumentValue("-s", argc, argv);
+	if(arg_value && strcmp(arg_value, "1") == 0) {
+		server_mode = TRUE;
+	}
+	printf("server_mode=%d\n", server_mode);
+	arg_value = findArgumentValue("-a", argc, argv);
+	if(arg_value && (inet_pton(AF_INET, arg_value, &mcast_address) <= 0)) {
+		errno = EINVAL;
+		cleanup("Invalid mcast address: ");
+	}
+	if(!arg_value) {
+		printf("mcast_address=%s (default)\n", SPAM_GROUP_ADDRESS);
+	}
+	else {
+		printf("mcast_address=%s\n", arg_value);
+	}
+	arg_value = findArgumentValue("-p", argc, argv);
+	if(arg_value) {
+		mcast_port = htons(atoi(arg_value));
+		printf("mcast_port=%s\n", arg_value);
+	}
+	else {
+		printf("mcast_port=%d (default)\n", SPAM_PORT);
+	}
+	arg_value = findArgumentValue("-i", argc, argv);
+	if(arg_value) {
+		if(findInterface(&mcast_interface, arg_value, AF_INET)) {
+			printf("mcast_interface=%s\n", arg_value);
 		}
-		printf("server_mode=%d\n", server_mode);
-		tmpStr = findArgumentValue("-a", argc, argv);
-		if(tmpStr && (inet_pton(AF_INET, tmpStr, &mcast_address) <= 0)) {
+		else {
 			errno = EINVAL;
-			cleanup("Invalid mcast address: ");
+			cleanup("findInterface");
 		}
-		if(!tmpStr) {
-			printf("mcast_address=%s (default)\n", SPAM_GROUP_ADDRESS);
-		}
-		else {
-			printf("mcast_address=%s\n", tmpStr);
-		}
-		tmpStr = findArgumentValue("-p", argc, argv);
-		if(tmpStr) {
-			mcast_port = htons(atoi(tmpStr));
-			printf("mcast_port=%s\n", tmpStr);
+	}
+	else {
+		printf("mcast_interface=INADDR_ANY (default)\n");
+	}
+	if(!server_mode) {
+		spam_string = findArgumentValue("-S", argc, argv);
+		if(spam_string) {
+			printf("spam_string=%s\n", spam_string);
 		}
 		else {
-			printf("mcast_port=%d (default)\n", SPAM_PORT);
-		}
-		/*tmpStr = findArgumentValue("-i", argc, argv);
-		if(tmpStr) {
-			mcast_interface = findInterface(&mcast_interface, tmpStr);
-			printf("mcast_interface=%s\n", tmpStr);
-		}
-		else {
-			printf("mcast_port=%d (default)\n", SPAM_PORT);
-		}*/
-		if(!server_mode) {
-			spam_string = findArgumentValue("-S", argc, argv);
-			if(spam_string) {
-				printf("spam_string=%s\n", spam_string);
-			}
-			else {
-				printf("spam_string=\"time is DDD MMM DD HH:mm:ss YYYY (default)\"\n");
-			}
+			printf("spam_string=\"time is DDD MMM DD HH:mm:ss YYYY (default)\"\n");
 		}
 	}
 
@@ -240,6 +258,14 @@ char *findArgumentValue(const char *arg, int argc, char **argv) {
 					cleanup(tmpStr);
 				}
 				return argv[i+1];
+			case 'i':
+				/* string to be spammed with */
+				if(i==argc-1 || (i<argc-1 && argv[i+1][0] == '-')) {
+					sprintf(tmpStr, "No interface given after '-i'");
+					errno = EINVAL;
+					cleanup(tmpStr);
+				}
+				return argv[i+1];
 			case 'S':
 				/* string to be spammed with */
 				if(i==argc-1 || (i<argc-1 && argv[i+1][0] == '-')) {
@@ -254,20 +280,33 @@ char *findArgumentValue(const char *arg, int argc, char **argv) {
 	return NULL;
 }
 
-void findInterface(struct in_addr *interface, const char *address) {
-	struct addrinfo *res, hints;
-	// TODO: find matching interface
-	memset(&hints, 0, sizeof(struct addrinfo));
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_DGRAM;
-	hints.ai_flags = 0;
-	hints.ai_protocol = 0;
-	/*
-	if(getaddrinfo(NULL, address, &hints, &res) != 0) {
-		cleanup("getaddrinfo");
+int findInterface(struct in_addr *interface, const char *address, int af_family) {
+	// TODO: for porting to Windows see http://msdn.microsoft.com/en-us/library/aa365915.aspx
+	struct ifaddrs *interfaces, *ifa;
+	char *paddr;
+	int found = FALSE;
+	if(getifaddrs(&interfaces)<0) {
+		cleanup("getifaddr");
 	}
-	interface->s_addr = inet_addr(inet_ntoa(*((struct in_addr*)res->h_addr_list[0])));
-	freeaddrinfo(res);
-	*/
+	for(ifa=interfaces; ifa&&ifa->ifa_next; ifa=ifa->ifa_next) {
+		paddr = inet_ntoa(((struct sockaddr_in *)ifa->ifa_addr)->sin_addr);
+		if((strcmp(address, ifa->ifa_name) == 0) || (strcmp(address, paddr) == 0)) {
+			if(ifa->ifa_addr->sa_family == AF_INET) {
+				if(strcmp(address, ifa->ifa_name) == 0) {
+					printf("Matched ifa_name: %s (paddr: %s)\n", ifa->ifa_name, paddr);
+				}
+				else if(strcmp(address, paddr) == 0) {
+					printf("Matched paddr: %s (ifa_name: %s)\n", paddr, ifa->ifa_name);
+				}
+				found = TRUE;
+				interface->s_addr = ((struct sockaddr_in *)ifa->ifa_addr)->sin_addr.s_addr;
+				break;
+			}
+		}
+	}
+	if(interfaces) {
+		freeifaddrs(interfaces);
+	}
+	return found;
 }
 
